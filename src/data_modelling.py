@@ -10,20 +10,12 @@ from sklearn.svm import SVC
 from sklearn.metrics import roc_curve, roc_auc_score, classification_report, confusion_matrix, accuracy_score, mean_absolute_error, mean_squared_error, root_mean_squared_error
 from imblearn.over_sampling import SMOTE, ADASYN
 
-def train_model(model_type, df, target_column):
-    if target_column not in df.columns:
-        raise ValueError("Target column is missing in dataset")
-    if 'purpose' in df.columns:
-        df = df.drop('purpose', axis=1)
-
-    X = df.loc[:, df.columns != target_column]
-    y = df[target_column]
+def train_model(model_type, X, y):
+    
     feature_names = X.columns.tolist()
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    smote = ADASYN(sampling_strategy='minority')
-    X_train, y_train = smote.fit_resample(X_train, y_train)
-
+    
     if model_type == 'Logistic Regression':
         model = LogisticRegression(max_iter=1000,class_weight='balanced', random_state=42)
     elif model_type == 'Random Forest':

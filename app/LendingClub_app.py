@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from pathlib import Path
 import sys
 from sklearn.preprocessing import MinMaxScaler
@@ -10,9 +11,10 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
 from sklearn.metrics import roc_curve, roc_auc_score, classification_report, confusion_matrix, accuracy_score
+from imblearn.over_sampling import SMOTE, ADASYN
 
 # Add repo root to path
-repo_root = Path.cwd().resolve().parent
+repo_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(repo_root))
 
 from src.data_modelling import train_model, evaluate_model
@@ -21,7 +23,7 @@ from src.data_modelling import train_model, evaluate_model
 @st.cache_data
 def load_data():
     import os
-    processed_dir = "../data/processed"
+    processed_dir = repo_root / "data" / "processed"
     datasets = {}
     name_mapping = {
         "loans_processed.csv": "Main Dataset",
@@ -35,7 +37,7 @@ def load_data():
     }
     for file in os.listdir(processed_dir):
         if file.endswith("_processed.csv"):
-            df = pd.read_csv(os.path.join(processed_dir, file), index_col=False)
+            df = pd.read_csv(processed_dir / file, index_col=False)
             if 'purpose' in df.columns:
                 df = df.drop(columns=['purpose'])
             readable_name = name_mapping.get(file, file.replace("_processed.csv", "").replace("loans_", "").replace("_", " ").title())
@@ -52,46 +54,78 @@ st.title("Lending Club Loan Default Prediction")
 # Sidebar
 st.sidebar.header("Model Configuration")
 selected_dataset = st.sidebar.radio("Select Dataset", list(datasets.keys()))
-selected_model = st.sidebar.radio("Select Model", models)
 
-# Train and evaluate model
-if st.sidebar.button("Train and Evaluate Model"):
+# Compare models
+if st.sidebar.button("Compare Models"):
     df = datasets[selected_dataset]
-    model, feature_names, X_test, y_test = train_model(selected_model, df, 'not.fully.paid')
+    X = df.loc[:, df.columns != 'not.fully.paid']
+    y = df['not.fully.paid']
+    smote = ADASYN(sampling_strategy='minority')
+    X, y = smote.fit_resample(X, y)
     
-    # Get predictions and probabilities
-    y_pred = model.predict(X_test)
-    y_proba = model.predict_proba(X_test)[:, 1]
+    results = []
+    roc_data = {}
+    conf_matrices = {}
+    for model_name in models:
+        model, feature_names, X_test, y_test = train_model(model_name, X, y)
+        
+        # Get predictions and probabilities
+        y_pred = model.predict(X_test)
+        y_proba = model.predict_proba(X_test)[:, 1]
+        
+        # Calculate metrics
+        accuracy = accuracy_score(y_test, y_pred)
+        roc_auc = roc_auc_score(y_test, y_proba)
+        precision = classification_report(y_test, y_pred, output_dict=True)['weighted avg']['precision']
+        recall = classification_report(y_test, y_pred, output_dict=True)['weighted avg']['recall']
+        f1 = classification_report(y_test, y_pred, output_dict=True)['weighted avg']['f1-score']
+        
+        results.append({
+            'Model': model_name,
+            'Accuracy': accuracy,
+            'ROC AUC': roc_auc,
+            'Precision': precision,
+            'Recall': recall,
+            'F1-Score': f1
+        })
+        
+        # Store ROC data
+        fpr, tpr, _ = roc_curve(y_test, y_proba)
+        roc_data[model_name] = (fpr, tpr, roc_auc)
+        
+        # Store confusion matrix
+        conf_matrices[model_name] = confusion_matrix(y_test, y_pred)
     
-    # Calculate metrics
-    accuracy = accuracy_score(y_test, y_pred)
-    roc_auc = roc_auc_score(y_test, y_proba)
-    class_report = classification_report(y_test, y_pred)
-    conf_matrix = confusion_matrix(y_test, y_pred)
+    results_df = pd.DataFrame(results)
+    st.header("Model Comparison")
+    st.table(results_df)
     
-    st.header("Model Evaluation")
+    # Confusion Matrices
+    st.header("Confusion Matrices")
+    cols = st.columns(3)
+    for i, model_name in enumerate(models):
+        with cols[i]:
+            st.subheader(f"{model_name}")
+            cm = conf_matrices[model_name]
+            fig, ax = plt.subplots(figsize=(4, 3))
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax, cbar=False)
+            ax.set_xlabel('Predicted')
+            ax.set_ylabel('Actual')
+            ax.set_title(f'{model_name}')
+            st.pyplot(fig)
     
-    st.subheader("Classification Report")
-    st.text(class_report)
-    
-    st.subheader("Confusion Matrix")
-    st.write(conf_matrix)
-    
-    st.subheader("Metrics")
-    st.write(f"Accuracy: {accuracy:.4f}")
-    st.write(f"ROC AUC: {roc_auc:.4f}")
-    
-    # ROC Curve
-    st.subheader("ROC Curve")
+    # ROC Curves
+    st.header("ROC Curves")
     fig, ax = plt.subplots()
-    fpr, tpr, thresholds = roc_curve(y_test, y_proba)
-    ax.plot(fpr, tpr, label=f'ROC curve (area = {roc_auc:.2f})')
+    for model_name in models:
+        fpr, tpr, roc_auc = roc_data[model_name]
+        ax.plot(fpr, tpr, label=f'{model_name} (area = {roc_auc:.2f})')
     ax.plot([0, 1], [0, 1], 'k--')
     ax.set_xlim([0.0, 1.0])
     ax.set_ylim([0.0, 1.05])
     ax.set_xlabel('False Positive Rate')
     ax.set_ylabel('True Positive Rate')
-    ax.set_title('Receiver Operating Characteristic')
+    ax.set_title('ROC Curves Comparison')
     ax.legend(loc="lower right")
     st.pyplot(fig)
 
@@ -118,9 +152,13 @@ if st.button("Predict"):
     # Prepare input data
     input_df = pd.DataFrame([input_data])
     
-    # Train model on selected dataset
+    # Train model on selected dataset (using Random Forest as default)
     df = datasets[selected_dataset]
-    model, _, _, _ = train_model(selected_model, df, 'not.fully.paid')
+    X = df.loc[:, df.columns != 'not.fully.paid']
+    y = df['not.fully.paid']
+    smote = ADASYN(sampling_strategy='minority')
+    X, y = smote.fit_resample(X, y)
+    model, _, _, _ = train_model("Random Forest", X, y)
     
     # Make prediction
     prediction = model.predict(input_df)[0]
